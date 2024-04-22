@@ -4,6 +4,7 @@ import sys
 import argparse
 import logging
 import os.path
+import random
 
 import pandas as pd
 import numpy as np
@@ -59,8 +60,8 @@ class DataFrameSelector(sklearn.base.BaseEstimator, sklearn.base.TransformerMixi
         # Titanic fields
         #Survived,Pclass,Name,Sex,Age,SibSp,Parch,Ticket,Fare,Cabin,Embarked
         self.mCategoricalPredictors = ["CONF"]
-        self.mNumericalPredictors = ["G","ADJOE", "ADJDE", "BARTHAG", "EFG_O", "EFG_D", "TOR", "TORD", "ORB", "DRB", "FTR", "FTRD", "2P_O", "2P_D", "3P_O", "3P_D", "ADJ_T", "WAB", "SEED"]
-        self.mLabels = ["WP"]
+        self.mNumericalPredictors = ["W", "G","ADJOE", "ADJDE", "BARTHAG", "EFG_O", "EFG_D", "TOR", "TORD", "ORB", "DRB", "FTR", "FTRD", "2P_O", "2P_D", "3P_O", "3P_D", "ADJ_T", "WAB", "SEED"]
+        self.mLabels = ["POSTSEASON"]
         #
         # Not currently using:
         #  "YEAR"
@@ -128,26 +129,15 @@ def get_data(filename):
     ###, index_col=0
     ###, keep_default_na=False
     data = pd.read_csv(filename, dtype={ "TEAM": str })
-    data['WP'] = data['W']/data['G']
     return data
 
 def load_data(my_args, filename):
     data = get_data(filename)
     feature_columns, label_column = get_feature_and_label_names(my_args, data)
+    data[label_column] = data[label_column].fillna("NO POSTSEASON")
     X = data[feature_columns]
     y = data[label_column]
-    y = convert_to_binary(my_args, y)
     return X, y
-
-def convert_to_binary(my_args, label):
-    bin_label = np.zeros(shape=len(label))
-    for i in range(len(label)):
-        if label[i] >= my_args.win_percent:
-            val = 1
-        else:
-            val = 0
-        bin_label[i] = val
-    return bin_label
 
 def get_feature_and_label_names(my_args, data):
     label_column = my_args.label
@@ -229,7 +219,7 @@ def make_decision_tree_fit_pipeline(my_args):
     items.append(("features", make_feature_pipeline(my_args)))
     if my_args.print_preprocessed_data:
         items.append(("printer", Printer("Final Preprocessing")))
-    items.append(("model", sklearn.tree.DecisionTreeClassifier(max_depth=10, max_leaf_nodes=100)))
+    items.append(("model", sklearn.tree.DecisionTreeClassifier(max_depth=my_args.depth, max_leaf_nodes=my_args.leaf_nodes)))
     return sklearn.pipeline.Pipeline(items)
 
 def do_fit(my_args):
@@ -321,7 +311,7 @@ def sklearn_metric(y, yhat):
     table = "+-----+-----+\n|{:4d} |{:4d} |\n+-----+-----+\n|{:4d} |{:4d} |\n+-----+-----+\n".format(cm[0][0], cm[1][0], cm[0][1], cm[1][1])
     print(table)
     print()
-    average = 'binary'
+    average = 'micro'
     precision = sklearn.metrics.precision_score(y, yhat, average=average)
     recall = sklearn.metrics.recall_score(y, yhat, average=average)
     f1 = sklearn.metrics.f1_score(y, yhat, average=average)
@@ -378,9 +368,10 @@ def show_model(my_args):
     if not os.path.exists(train_file):
         raise Exception("training data file: {} does not exist.".format(train_file))
     
-    test_file = get_test_filename(my_args.test_file, train_file)
-    if not os.path.exists(test_file):
-        raise Exception("testing data file, '{}', does not exist.".format(test_file))
+    if my_args.show_test:
+        test_file = get_test_filename(my_args.test_file, train_file)
+        if not os.path.exists(test_file):
+            raise Exception("testing data file, '{}', does not exist.".format(test_file))
     
     model_file = get_model_filename(my_args.model_file, train_file)
     if not os.path.exists(model_file):
@@ -399,12 +390,84 @@ def show_model(my_args):
     
     return
 
+def get_score(my_args, train_file):
+    model_file = get_model_filename(my_args.model_file, train_file)
+    if not os.path.exists(model_file):
+        raise Exception("Model file, '{}', does not exist.".format(model_file))
+
+    X_train, y_train = load_data(my_args, train_file)
+    pipeline = joblib.load(model_file)
+    
+    basename = get_basename(train_file)
+
+    yhat_train = pipeline.predict(X_train)
+
+
+
+    cm = sklearn.metrics.confusion_matrix(y_train, yhat_train)
+    table = "+-----+-----+\n|{:4d} |{:4d} |\n+-----+-----+\n|{:4d} |{:4d} |\n+-----+-----+\n".format(cm[0][0], cm[1][0], cm[0][1], cm[1][1])
+    average = 'micro'
+    precision = sklearn.metrics.precision_score(y_train, yhat_train, average=average)
+    recall = sklearn.metrics.recall_score(y_train, yhat_train, average=average)
+    f1 = sklearn.metrics.f1_score(y_train, yhat_train, average=average)
+    return (precision, recall, f1)
+
+
+
+def hyper_parameter_search(my_args):
+    #find best depth and num leaf nodes
+    best_f1 = 0
+    best_depth = 0
+    best_ln = 0
+
+    train_file = my_args.train_file
+    if not os.path.exists(train_file):
+        raise Exception("training data file: {} does not exist.".format(train_file))
+
+    for i in range(1000):
+        
+        d = random.randrange(1, 100)
+        ln = random.randrange(2, 100)
+        my_args.depth = d
+        my_args.leaf_nodes= ln
+        
+        print("Testing with ", d, " and ", ln, " as hyperparameters") 
+
+        do_fit(my_args)
+
+        precision, recall, f1 = get_score(my_args, train_file)
+        
+        if f1 > best_f1:
+            best_f1 = f1
+            best_depth = d
+            best_ln = ln
+
+    print("Best depth: ", best_depth, ", Best leafNodes: ", best_ln)
+    my_args.depth = best_depth
+    my_args.leaf_nodes= best_ln
+    do_fit(my_args)
+    show_score(my_args)
+    return
+
+def do_cross_validation(my_args):
+    train_file = my_args.train_file
+    if not os.path.exists(train_file):
+        raise Exception("training data file: {} does not exist.".format(train_file))
+
+    X, y = load_data(my_args, train_file)
+    
+    pipeline = make_decision_tree_fit_pipeline(my_args)
+    scores = sklearn.model_selection.cross_val_score(pipeline, X, y, cv=5, scoring="f1_micro")
+    #scores = sklearn.model_selection.cross_val_score(pipeline, X, y, cv=sklearn.model_selection.LeaveOneOut(), scoring="f1_micro")
+    print("Mean: {:6.4f} STD: {:6.4f}\nAll: {}".format(scores.mean(), scores.std(), scores))
+
+    return
 
 
 def parse_args(argv):
     parser = argparse.ArgumentParser(prog=argv[0], description='Fit Data With Linear Regression Using Pipeline')
     parser.add_argument('action', default='DT',
-                        choices=[ "DT", "score", "show-model" ], 
+                        choices=[ "DT", "score", "show-model", "hyperparameter-search", "cross-validate" ], 
                         nargs='?', help="desired action")
     parser.add_argument('--train-file',    '-t', default="",    type=str,   help="name of file with training data")
     parser.add_argument('--test-file',     '-T', default="",    type=str,   help="name of file with test data (default is constructed from train file name)")
@@ -419,7 +482,8 @@ def parse_args(argv):
     parser.add_argument('--categorical-missing-strategy', default="",   type=str,   help="strategy for missing categorical information")
     parser.add_argument('--numerical-missing-strategy', default="",   type=str,   help="strategy for missing numerical information")
     parser.add_argument('--print-preprocessed-data', default=0,         type=int,   help="0 = don't do the debugging print, 1 = do print (default=0)")
-    parser.add_argument('--win-percent',     '-wp', default=0.5,        type=float,   help="the win percent to sort the label into binary data, 1 is greater than the percent, 0 is less")
+    parser.add_argument('--leaf-nodes',  default=50,         type=int,   help="the max leaf nodes in the decision tree")
+    parser.add_argument('--depth', default=3,         type=int,          help="the max depth of the decision tree")
     my_args = parser.parse_args(argv[1:])
 
     #
@@ -449,6 +513,10 @@ def main(argv):
         show_score(my_args)
     elif my_args.action == "show-model":
         show_model(my_args)
+    elif my_args.action == "hyperparameter-search":
+        hyper_parameter_search(my_args)
+    elif my_args.action == "cross-validate":
+        do_cross_validation(my_args)
     else:
         raise Exception("Action: {} is not known.".format(my_args.action))
         
